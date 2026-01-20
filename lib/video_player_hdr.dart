@@ -34,6 +34,32 @@ class HdrVideoError implements Exception {
   String toString() => message;
 }
 
+/// Configuration for orientation handling in video player
+class VideoPlayerHdrOrientationConfig {
+  /// Whether to automatically detect and adjust orientation based on video aspect ratio
+  final bool autoDetectDeviceOrientation;
+
+  /// Whether to handle lifecycle events for orientation
+  final bool handleLifecycle;
+
+  /// Allowed device orientations when video is playing
+  final List<DeviceOrientation>? deviceOrientations;
+
+  /// Allowed device orientations after exiting fullscreen (if applicable)
+  final List<DeviceOrientation>? deviceOrientationsAfterFullScreen;
+
+  /// Whether to expand video to fill screen
+  final bool expandToFill;
+
+  const VideoPlayerHdrOrientationConfig({
+    this.autoDetectDeviceOrientation = true,
+    this.handleLifecycle = true,
+    this.deviceOrientations,
+    this.deviceOrientationsAfterFullScreen,
+    this.expandToFill = false,
+  });
+}
+
 VideoPlayerPlatform? _lastVideoPlayerPlatform;
 
 VideoPlayerPlatform get _videoPlayerPlatform {
@@ -72,11 +98,15 @@ class VideoPlayerHdrValue {
   });
 
   /// Returns an instance for a video that hasn't been loaded.
-  const VideoPlayerHdrValue.uninitialized() : this(duration: Duration.zero, isInitialized: false);
+  const VideoPlayerHdrValue.uninitialized()
+      : this(duration: Duration.zero, isInitialized: false);
 
   /// Returns an instance with the given [errorDescription].
   const VideoPlayerHdrValue.erroneous(String errorDescription)
-      : this(duration: Duration.zero, isInitialized: false, errorDescription: errorDescription);
+      : this(
+            duration: Duration.zero,
+            isInitialized: false,
+            errorDescription: errorDescription);
 
   /// This constant is just to indicate that parameter is not passed to [copyWith]
   /// workaround for this issue https://github.com/dart-lang/language/issues/2009
@@ -193,8 +223,9 @@ class VideoPlayerHdrValue {
       volume: volume ?? this.volume,
       playbackSpeed: playbackSpeed ?? this.playbackSpeed,
       rotationCorrection: rotationCorrection ?? this.rotationCorrection,
-      errorDescription:
-          errorDescription != _defaultErrorDescription ? errorDescription : this.errorDescription,
+      errorDescription: errorDescription != _defaultErrorDescription
+          ? errorDescription
+          : this.errorDescription,
       isCompleted: isCompleted ?? this.isCompleted,
     );
   }
@@ -276,7 +307,10 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
   /// null. The [package] argument must be non-null when the asset comes from a
   /// package and null otherwise.
   VideoPlayerHdrController.asset(this.dataSource,
-      {this.package, Future<ClosedCaptionFile>? closedCaptionFile, this.videoPlayerOptions})
+      {this.package,
+      Future<ClosedCaptionFile>? closedCaptionFile,
+      this.videoPlayerOptions,
+      this.orientationConfig})
       : _closedCaptionFileFuture = closedCaptionFile,
         dataSourceType = DataSourceType.asset,
         formatHint = null,
@@ -299,6 +333,7 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
     Future<ClosedCaptionFile>? closedCaptionFile,
     this.videoPlayerOptions,
     this.httpHeaders = const <String, String>{},
+    this.orientationConfig,
   })  : _closedCaptionFileFuture = closedCaptionFile,
         dataSourceType = DataSourceType.network,
         package = null,
@@ -319,6 +354,7 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
     Future<ClosedCaptionFile>? closedCaptionFile,
     this.videoPlayerOptions,
     this.httpHeaders = const <String, String>{},
+    this.orientationConfig,
   })  : _closedCaptionFileFuture = closedCaptionFile,
         dataSource = url.toString(),
         dataSourceType = DataSourceType.network,
@@ -332,7 +368,8 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
   VideoPlayerHdrController.file(File file,
       {Future<ClosedCaptionFile>? closedCaptionFile,
       this.videoPlayerOptions,
-      this.httpHeaders = const <String, String>{}})
+      this.httpHeaders = const <String, String>{},
+      this.orientationConfig})
       : _closedCaptionFileFuture = closedCaptionFile,
         dataSource = Uri.file(file.absolute.path).toString(),
         dataSourceType = DataSourceType.file,
@@ -345,7 +382,9 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
   /// This will load the video from the input content-URI.
   /// This is supported on Android only.
   VideoPlayerHdrController.contentUri(Uri contentUri,
-      {Future<ClosedCaptionFile>? closedCaptionFile, this.videoPlayerOptions})
+      {Future<ClosedCaptionFile>? closedCaptionFile,
+      this.videoPlayerOptions,
+      this.orientationConfig})
       : assert(defaultTargetPlatform == TargetPlatform.android,
             'VideoPlayerController.contentUri is only supported on Android.'),
         _closedCaptionFileFuture = closedCaptionFile,
@@ -376,6 +415,9 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
   /// Provide additional configuration options (optional). Like setting the audio mode to mix
   final VideoPlayerOptions? videoPlayerOptions;
 
+  /// Orientation configuration for the video player
+  final VideoPlayerHdrOrientationConfig? orientationConfig;
+
   /// Only set for [asset] videos. The package that the asset was loaded from.
   final String? package;
 
@@ -386,6 +428,9 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
   Completer<void>? _creatingCompleter;
   StreamSubscription<dynamic>? _eventSubscription;
   _VideoAppLifeCycleObserver? _lifeCycleObserver;
+  StreamSubscription<String>? _orientationSubscription;
+  String? _currentDeviceOrientation;
+  List<DeviceOrientation>? _savedOrientations;
 
   /// The id of a texture that hasn't been initialized.
   @visibleForTesting
@@ -398,7 +443,8 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
   int get textureId => _textureId;
 
   static const MethodChannel _hdrChannel = MethodChannel('video_player_hdr');
-  static const EventChannel _orientationChannel = EventChannel('video_player_hdr/orientation');
+  static const EventChannel _orientationChannel =
+      EventChannel('video_player_hdr/orientation');
 
   /// Check if the device supports HDR playback
   Future<bool> isHdrSupported() async {
@@ -427,7 +473,8 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
     }
 
     try {
-      final List<dynamic> formats = await _hdrChannel.invokeMethod('getSupportedHdrFormats');
+      final List<dynamic> formats =
+          await _hdrChannel.invokeMethod('getSupportedHdrFormats');
       return formats.cast<String>();
     } on PlatformException catch (e) {
       throw HdrVideoError(
@@ -445,7 +492,8 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
     }
 
     try {
-      final bool isSupported = await _hdrChannel.invokeMethod('isWideColorGamutSupported');
+      final bool isSupported =
+          await _hdrChannel.invokeMethod('isWideColorGamutSupported');
       return isSupported;
     } on PlatformException catch (e) {
       throw HdrVideoError(
@@ -464,7 +512,8 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
     }
 
     try {
-      final String orientation = await _hdrChannel.invokeMethod('getCurrentOrientation');
+      final String orientation =
+          await _hdrChannel.invokeMethod('getCurrentOrientation');
       return orientation;
     } on PlatformException catch (e) {
       throw HdrVideoError(
@@ -505,7 +554,8 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
         'filePath': formattedPath,
         'httpHeaders': httpHeaders,
       });
-      final Map<String, dynamic> metadata = Map<String, dynamic>.from(result as Map);
+      final Map<String, dynamic> metadata =
+          Map<String, dynamic>.from(result as Map);
       return metadata;
     } on PlatformException catch (e) {
       throw HdrVideoError(
@@ -518,11 +568,19 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
   Future<void> initialize({
     VideoViewType viewType = VideoViewType.platformView,
   }) async {
-    final bool allowBackgroundPlayback = videoPlayerOptions?.allowBackgroundPlayback ?? false;
-    if (!allowBackgroundPlayback) {
+    final bool allowBackgroundPlayback =
+        videoPlayerOptions?.allowBackgroundPlayback ?? false;
+    final bool handleLifecycle = orientationConfig?.handleLifecycle ?? true;
+
+    if (!allowBackgroundPlayback && handleLifecycle) {
       _lifeCycleObserver = _VideoAppLifeCycleObserver(this);
     }
     _lifeCycleObserver?.initialize();
+
+    // Handle orientation configuration
+    if (orientationConfig != null) {
+      _setupOrientationHandling();
+    }
     _creatingCompleter = Completer<void>();
 
     late DataSource dataSourceDescription;
@@ -554,11 +612,13 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
     }
 
     if (videoPlayerOptions?.mixWithOthers != null) {
-      await _videoPlayerPlatform.setMixWithOthers(videoPlayerOptions!.mixWithOthers);
+      await _videoPlayerPlatform
+          .setMixWithOthers(videoPlayerOptions!.mixWithOthers);
     }
 
     _textureId = (await _videoPlayerPlatform.createWithOptions(
-            VideoCreationOptions(dataSource: dataSourceDescription, viewType: viewType))) ??
+            VideoCreationOptions(
+                dataSource: dataSourceDescription, viewType: viewType))) ??
         kUninitializedTextureId;
     _creatingCompleter!.complete(null);
     final Completer<void> initializingCompleter = Completer<void>();
@@ -600,6 +660,12 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
           _applyLooping();
           _applyVolume();
           _applyPlayPause();
+
+          // Apply orientation settings after initialization
+          if (orientationConfig?.autoDetectDeviceOrientation == true &&
+              value.isInitialized) {
+            _applyOrientationBasedOnAspectRatio();
+          }
         case VideoEventType.completed:
           // In this case we need to stop _timer, set isPlaying=false, and
           // position=value.duration. Instead of setting the values directly,
@@ -615,7 +681,8 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
           value = value.copyWith(isBuffering: false);
         case VideoEventType.isPlayingStateUpdate:
           if (event.isPlaying ?? false) {
-            value = value.copyWith(isPlaying: event.isPlaying, isCompleted: false);
+            value =
+                value.copyWith(isPlaying: event.isPlaying, isCompleted: false);
           } else {
             value = value.copyWith(isPlaying: event.isPlaying);
           }
@@ -655,12 +722,137 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
         _isDisposed = true;
         _timer?.cancel();
         await _eventSubscription?.cancel();
+        await _orientationSubscription?.cancel();
         await _videoPlayerPlatform.dispose(_textureId);
       }
       _lifeCycleObserver?.dispose();
+      _restoreOrientation();
     }
     _isDisposed = true;
     super.dispose();
+  }
+
+  void _setupOrientationHandling() {
+    if (orientationConfig == null) return;
+
+    // Save current orientations
+    _savedOrientations = null; // Will be set when we lock orientations
+
+    // Set initial orientations if specified
+    if (orientationConfig!.deviceOrientations != null) {
+      SystemChrome.setPreferredOrientations(
+          orientationConfig!.deviceOrientations!);
+    }
+
+    // Listen to orientation changes if auto-detect is enabled
+    if (orientationConfig!.autoDetectDeviceOrientation) {
+      try {
+        _orientationSubscription = orientationChanges.listen(
+          (String orientation) {
+            if (!_isDisposed) {
+              _currentDeviceOrientation = orientation;
+              _applyOrientationBasedOnAspectRatio();
+            }
+          },
+          onError: (error) {
+            if (kDebugMode) {
+              print('Orientation detection error: $error');
+            }
+          },
+        );
+      } catch (e) {
+        if (kDebugMode) {
+          print('Orientation detection not available: $e');
+        }
+      }
+    }
+  }
+
+  void _applyOrientationBasedOnAspectRatio() {
+    if (!value.isInitialized || orientationConfig == null || _isDisposed)
+      return;
+
+    try {
+      final double aspectRatio = value.aspectRatio;
+      // Handle edge cases where aspect ratio might be invalid
+      if (aspectRatio <= 0 || !aspectRatio.isFinite) return;
+
+      final bool isLandscapeVideo = aspectRatio >= 1.0;
+
+      // Auto-detect orientation based on video aspect ratio
+      if (orientationConfig!.autoDetectDeviceOrientation) {
+        if (isLandscapeVideo) {
+          // Video is landscape, allow landscape orientations
+          SystemChrome.setPreferredOrientations([
+            DeviceOrientation.landscapeLeft,
+            DeviceOrientation.landscapeRight,
+          ]);
+        } else {
+          // Video is portrait, allow portrait orientations
+          SystemChrome.setPreferredOrientations([
+            DeviceOrientation.portraitUp,
+            DeviceOrientation.portraitDown,
+          ]);
+        }
+      }
+    } catch (e) {
+      // Silently handle errors to prevent breaking video playback
+      if (kDebugMode) {
+        print('Error applying orientation based on aspect ratio: $e');
+      }
+    }
+  }
+
+  void _restoreOrientation() {
+    try {
+      if (_savedOrientations != null) {
+        SystemChrome.setPreferredOrientations(_savedOrientations!);
+      } else if (orientationConfig?.deviceOrientationsAfterFullScreen != null) {
+        SystemChrome.setPreferredOrientations(
+          orientationConfig!.deviceOrientationsAfterFullScreen!,
+        );
+      } else {
+        // Restore to all orientations
+        SystemChrome.setPreferredOrientations([
+          DeviceOrientation.portraitUp,
+          DeviceOrientation.portraitDown,
+          DeviceOrientation.landscapeLeft,
+          DeviceOrientation.landscapeRight,
+        ]);
+      }
+    } catch (e) {
+      // Silently handle errors during cleanup
+      if (kDebugMode) {
+        print('Error restoring orientation: $e');
+      }
+    }
+  }
+
+  /// Get the effective aspect ratio based on current orientation
+  double getEffectiveAspectRatio() {
+    if (!value.isInitialized) return 1.0;
+
+    final double aspectRatio = value.aspectRatio;
+    final bool isLandscape =
+        _currentDeviceOrientation?.contains('landscape') ?? false;
+    final bool isPortrait =
+        _currentDeviceOrientation?.contains('portrait') ?? false;
+
+    // If video is rotated 90 or 270 degrees, swap aspect ratio
+    if (value.rotationCorrection == 90 || value.rotationCorrection == 270) {
+      return 1.0 / aspectRatio;
+    }
+
+    // If orientation config wants to expand to fill, return screen aspect ratio
+    if (orientationConfig?.expandToFill == true) {
+      if (isLandscape) {
+        return 16.0 / 9.0; // Typical landscape
+      } else if (isPortrait) {
+        return 9.0 / 16.0; // Typical portrait
+      }
+    }
+
+    return aspectRatio;
   }
 
   /// Starts playing the video.
@@ -975,7 +1167,7 @@ class _VideoPlayerHdrState extends State<VideoPlayerHdr> {
     // Need to listen for initialization events since the actual texture ID
     // becomes available after asynchronous initialization finishes.
     widget.controller.addListener(_listener);
-    
+
     // Listen to native orientation changes
     if (Platform.isAndroid || Platform.isIOS) {
       _startOrientationListening();
@@ -1024,13 +1216,32 @@ class _VideoPlayerHdrState extends State<VideoPlayerHdr> {
 
   @override
   Widget build(BuildContext context) {
-    return _textureId == VideoPlayerHdrController.kUninitializedTextureId
-        ? Container()
-        : _VideoPlayerWithRotation(
-            rotation: widget.controller.value.rotationCorrection,
-            orientation: _currentOrientation,
-            child: _videoPlayerPlatform.buildView(_textureId),
-          );
+    if (_textureId == VideoPlayerHdrController.kUninitializedTextureId) {
+      return Container();
+    }
+
+    Widget videoWidget = _videoPlayerPlatform.buildView(_textureId);
+
+    // Apply rotation correction
+    if (widget.controller.value.rotationCorrection != 0) {
+      videoWidget = _VideoPlayerWithRotation(
+        rotation: widget.controller.value.rotationCorrection,
+        child: videoWidget,
+      );
+    }
+
+    // Wrap with orientation-aware aspect ratio if configured
+    if (widget.controller.orientationConfig != null &&
+        widget.controller.value.isInitialized) {
+      final double effectiveAspectRatio =
+          widget.controller.getEffectiveAspectRatio();
+      videoWidget = AspectRatio(
+        aspectRatio: effectiveAspectRatio,
+        child: videoWidget,
+      );
+    }
+
+    return videoWidget;
   }
 }
 
@@ -1038,30 +1249,20 @@ class _VideoPlayerWithRotation extends StatelessWidget {
   const _VideoPlayerWithRotation({
     required this.rotation,
     required this.child,
-    this.orientation,
   }) : assert(rotation % 90 == 0, 'Rotation must be a multiple of 90');
 
   final int rotation;
   final Widget child;
-  final String? orientation;
 
   @override
   Widget build(BuildContext context) {
-    Widget videoWidget = child;
-    
-    // Apply video rotation correction first
-    if (rotation != 0) {
-      videoWidget = RotatedBox(
-        quarterTurns: rotation ~/ 90,
-        child: videoWidget,
-      );
+    if (rotation == 0) {
+      return child;
     }
-    
-    // The native orientation handling ensures the video player view
-    // automatically adapts to device orientation changes. The Flutter
-    // widget tree will automatically rebuild on orientation changes,
-    // and the native view will handle the layout correctly.
-    return videoWidget;
+    return RotatedBox(
+      quarterTurns: rotation ~/ 90,
+      child: child,
+    );
   }
 }
 
@@ -1161,7 +1362,8 @@ class _VideoScrubberState extends State<VideoScrubber> {
         seekToRelativePosition(details.globalPosition);
       },
       onHorizontalDragEnd: (DragEndDetails details) {
-        if (_controllerWasPlaying && controller.value.position != controller.value.duration) {
+        if (_controllerWasPlaying &&
+            controller.value.position != controller.value.duration) {
           controller.play();
         }
       },
