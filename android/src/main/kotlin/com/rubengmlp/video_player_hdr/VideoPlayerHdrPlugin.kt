@@ -6,19 +6,26 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.view.Display
+import android.view.OrientationEventListener
+import android.view.Surface
 import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import java.io.File
 import java.io.FileOutputStream
+import java.util.HashMap
 
 /** VideoPlayerHdrPlugin */
 class VideoPlayerHdrPlugin : FlutterPlugin, MethodCallHandler {
     private lateinit var channel: MethodChannel
+    private lateinit var eventChannel: EventChannel
     private lateinit var context: Context
     private lateinit var flutterAssets: FlutterPlugin.FlutterAssets
+    private var orientationEventListener: OrientationEventListener? = null
+    private var eventSink: EventChannel.EventSink? = null
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         context = flutterPluginBinding.applicationContext
@@ -26,10 +33,74 @@ class VideoPlayerHdrPlugin : FlutterPlugin, MethodCallHandler {
         channel =
             MethodChannel(flutterPluginBinding.binaryMessenger, "video_player_hdr")
         channel.setMethodCallHandler(this)
+        
+        // Setup orientation event channel
+        eventChannel = EventChannel(flutterPluginBinding.binaryMessenger, "video_player_hdr/orientation")
+        eventChannel.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                eventSink = events
+                startOrientationListening()
+            }
+
+            override fun onCancel(arguments: Any?) {
+                stopOrientationListening()
+                eventSink = null
+            }
+        })
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
+        stopOrientationListening()
+        eventChannel.setStreamHandler(null)
+    }
+    
+    private fun startOrientationListening() {
+        if (orientationEventListener != null) {
+            return
+        }
+        
+        orientationEventListener = object : OrientationEventListener(context) {
+            override fun onOrientationChanged(orientation: Int) {
+                val orientationValue = when {
+                    orientation >= 340 || orientation < 20 -> "portrait_up"
+                    orientation in 70..110 -> "landscape_right"
+                    orientation in 160..200 -> "portrait_down"
+                    orientation in 250..290 -> "landscape_left"
+                    else -> null
+                }
+                
+                if (orientationValue != null) {
+                    eventSink?.success(orientationValue)
+                }
+            }
+        }
+        
+        if (orientationEventListener?.canDetectOrientation() == true) {
+            orientationEventListener?.enable()
+        }
+    }
+    
+    private fun stopOrientationListening() {
+        orientationEventListener?.disable()
+        orientationEventListener = null
+    }
+    
+    private fun getCurrentOrientation(): String {
+        val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            context.display
+        } else {
+            @Suppress("DEPRECATION")
+            (context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager).defaultDisplay
+        }
+        
+        return when (display?.rotation) {
+            Surface.ROTATION_0 -> "portrait_up"
+            Surface.ROTATION_90 -> "landscape_left"
+            Surface.ROTATION_180 -> "portrait_down"
+            Surface.ROTATION_270 -> "landscape_right"
+            else -> "portrait_up"
+        }
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
@@ -38,6 +109,7 @@ class VideoPlayerHdrPlugin : FlutterPlugin, MethodCallHandler {
             "getSupportedHdrFormats" -> getSupportedHdrFormats(result)
             "isWideColorGamutSupported" -> isWideColorGamutSupported(result)
             "getVideoMetadata" -> getVideoMetadata(call, result)
+            "getCurrentOrientation" -> result.success(getCurrentOrientation())
             else -> result.notImplemented()
         }
     }

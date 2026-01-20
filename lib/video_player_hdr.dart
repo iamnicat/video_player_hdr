@@ -398,6 +398,7 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
   int get textureId => _textureId;
 
   static const MethodChannel _hdrChannel = MethodChannel('video_player_hdr');
+  static const EventChannel _orientationChannel = EventChannel('video_player_hdr/orientation');
 
   /// Check if the device supports HDR playback
   Future<bool> isHdrSupported() async {
@@ -451,6 +452,36 @@ class VideoPlayerHdrController extends ValueNotifier<VideoPlayerHdrValue> {
         'Failed to check wide color gamut support: ${e.message}',
       );
     }
+  }
+
+  /// Get the current device orientation
+  /// Returns: "portrait_up", "portrait_down", "landscape_left", or "landscape_right"
+  Future<String> getCurrentOrientation() async {
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      throw HdrVideoError(
+        'Orientation detection is only available on Android and iOS',
+      );
+    }
+
+    try {
+      final String orientation = await _hdrChannel.invokeMethod('getCurrentOrientation');
+      return orientation;
+    } on PlatformException catch (e) {
+      throw HdrVideoError(
+        'Failed to get current orientation: ${e.message}',
+      );
+    }
+  }
+
+  /// Stream of orientation changes
+  /// Emits: "portrait_up", "portrait_down", "landscape_left", or "landscape_right"
+  Stream<String> get orientationChanges {
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      throw HdrVideoError(
+        'Orientation detection is only available on Android and iOS',
+      );
+    }
+    return _orientationChannel.receiveBroadcastStream().cast<String>();
   }
 
   /// Retrieves metadata about the video.
@@ -933,8 +964,9 @@ class _VideoPlayerHdrState extends State<VideoPlayerHdr> {
   }
 
   late VoidCallback _listener;
-
   late int _textureId;
+  StreamSubscription<String>? _orientationSubscription;
+  String? _currentOrientation;
 
   @override
   void initState() {
@@ -943,6 +975,36 @@ class _VideoPlayerHdrState extends State<VideoPlayerHdr> {
     // Need to listen for initialization events since the actual texture ID
     // becomes available after asynchronous initialization finishes.
     widget.controller.addListener(_listener);
+    
+    // Listen to native orientation changes
+    if (Platform.isAndroid || Platform.isIOS) {
+      _startOrientationListening();
+    }
+  }
+
+  void _startOrientationListening() {
+    try {
+      _orientationSubscription = widget.controller.orientationChanges.listen(
+        (String orientation) {
+          if (mounted && _currentOrientation != orientation) {
+            setState(() {
+              _currentOrientation = orientation;
+            });
+          }
+        },
+        onError: (error) {
+          // Silently handle orientation errors to avoid breaking video playback
+          if (kDebugMode) {
+            print('Orientation detection error: $error');
+          }
+        },
+      );
+    } catch (e) {
+      // Silently handle errors if orientation detection is not available
+      if (kDebugMode) {
+        print('Orientation detection not available: $e');
+      }
+    }
   }
 
   @override
@@ -957,6 +1019,7 @@ class _VideoPlayerHdrState extends State<VideoPlayerHdr> {
   void deactivate() {
     super.deactivate();
     widget.controller.removeListener(_listener);
+    _orientationSubscription?.cancel();
   }
 
   @override
@@ -965,27 +1028,40 @@ class _VideoPlayerHdrState extends State<VideoPlayerHdr> {
         ? Container()
         : _VideoPlayerWithRotation(
             rotation: widget.controller.value.rotationCorrection,
+            orientation: _currentOrientation,
             child: _videoPlayerPlatform.buildView(_textureId),
           );
   }
 }
 
 class _VideoPlayerWithRotation extends StatelessWidget {
-  const _VideoPlayerWithRotation({required this.rotation, required this.child})
-      : assert(rotation % 90 == 0, 'Rotation must be a multiple of 90');
+  const _VideoPlayerWithRotation({
+    required this.rotation,
+    required this.child,
+    this.orientation,
+  }) : assert(rotation % 90 == 0, 'Rotation must be a multiple of 90');
 
   final int rotation;
   final Widget child;
+  final String? orientation;
 
   @override
   Widget build(BuildContext context) {
-    if (rotation == 0) {
-      return child;
+    Widget videoWidget = child;
+    
+    // Apply video rotation correction first
+    if (rotation != 0) {
+      videoWidget = RotatedBox(
+        quarterTurns: rotation ~/ 90,
+        child: videoWidget,
+      );
     }
-    return RotatedBox(
-      quarterTurns: rotation ~/ 90,
-      child: child,
-    );
+    
+    // The native orientation handling ensures the video player view
+    // automatically adapts to device orientation changes. The Flutter
+    // widget tree will automatically rebuild on orientation changes,
+    // and the native view will handle the layout correctly.
+    return videoWidget;
   }
 }
 

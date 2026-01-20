@@ -4,12 +4,20 @@ import AVFoundation
 
 public class VideoPlayerHdrPlugin: NSObject, FlutterPlugin {
     private static var registrar: FlutterPluginRegistrar?
+    private var orientationChannel: FlutterEventChannel?
+    private var orientationEventSink: FlutterEventSink?
+    private var orientationObserver: NSObjectProtocol?
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         self.registrar = registrar
         let channel = FlutterMethodChannel(name: "video_player_hdr", binaryMessenger: registrar.messenger())
         let instance = VideoPlayerHdrPlugin()
         registrar.addMethodCallDelegate(instance, channel: channel)
+        
+        // Setup orientation event channel
+        let orientationEventChannel = FlutterEventChannel(name: "video_player_hdr/orientation", binaryMessenger: registrar.messenger())
+        instance.orientationChannel = orientationEventChannel
+        orientationEventChannel.setStreamHandler(instance)
     }
     
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -35,8 +43,41 @@ public class VideoPlayerHdrPlugin: NSObject, FlutterPlugin {
                                     message: "This feature is only supported on iOS 15.0 and above",
                                     details: nil))
             }
+        case "getCurrentOrientation":
+            result(getCurrentOrientation())
         default:
             result(FlutterMethodNotImplemented)
+        }
+    }
+    
+    private func getCurrentOrientation() -> String {
+        let orientation = UIDevice.current.orientation
+        switch orientation {
+        case .portrait:
+            return "portrait_up"
+        case .portraitUpsideDown:
+            return "portrait_down"
+        case .landscapeLeft:
+            return "landscape_left"
+        case .landscapeRight:
+            return "landscape_right"
+        default:
+            // Fallback to interface orientation if device orientation is unknown
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                switch windowScene.interfaceOrientation {
+                case .portrait:
+                    return "portrait_up"
+                case .portraitUpsideDown:
+                    return "portrait_down"
+                case .landscapeLeft:
+                    return "landscape_left"
+                case .landscapeRight:
+                    return "landscape_right"
+                default:
+                    return "portrait_up"
+                }
+            }
+            return "portrait_up"
         }
     }
     
@@ -253,5 +294,50 @@ extension UIDevice {
         case "iPhone17,4": return "iPhone 16 Pro Max"
         default: return identifier
         }
+    }
+}
+
+// MARK: - FlutterStreamHandler for orientation events
+extension VideoPlayerHdrPlugin: FlutterStreamHandler {
+    public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+        orientationEventSink = events
+        startOrientationListening()
+        return nil
+    }
+    
+    public func onCancel(withArguments arguments: Any?) -> FlutterError? {
+        stopOrientationListening()
+        orientationEventSink = nil
+        return nil
+    }
+    
+    private func startOrientationListening() {
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        
+        let notificationCenter = NotificationCenter.default
+        orientationObserver = notificationCenter.addObserver(
+            forName: UIDevice.orientationDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            let orientation = self.getCurrentOrientation()
+            self.orientationEventSink?(orientation)
+        }
+        
+        // Send initial orientation
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            let orientation = self.getCurrentOrientation()
+            self.orientationEventSink?(orientation)
+        }
+    }
+    
+    private func stopOrientationListening() {
+        if let observer = orientationObserver {
+            NotificationCenter.default.removeObserver(observer)
+            orientationObserver = nil
+        }
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
     }
 }
